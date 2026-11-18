@@ -119,6 +119,19 @@ try:
         absolute_min_temperature=("metrics.temperature.min", "min"),
     )
 
+    # Crea la carpeta de salida y guarda los tres DataFrames en formato Parquet con PyArrow.
+    data_directory = Path(__file__).with_name("data")
+    data_directory.mkdir(parents=True, exist_ok=True)
+    df_total.to_parquet(
+        data_directory / "df_total.parquet", engine="pyarrow", index=False
+    )
+    city_summary.to_parquet(
+        data_directory / "city_summary.parquet", engine="pyarrow", index=False
+    )
+    annual_summary.to_parquet(
+        data_directory / "annual_summary.parquet", engine="pyarrow", index=False
+    )
+
     print(df_total.head())
     print("\nResumen por ciudad:")
     print(city_summary)
