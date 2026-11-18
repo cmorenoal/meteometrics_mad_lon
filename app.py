@@ -19,12 +19,12 @@ try:
         city_data["city"] = url[-3:]
         city_dataframes.append(city_data)
 
-    all_cities_data = pd.concat(city_dataframes, ignore_index=True)
-    initial_records = len(all_cities_data)
+    df_total = pd.concat(city_dataframes, ignore_index=True)
+    initial_records = len(df_total)
 
     # 1. Sustituye comas decimales por puntos en las columnas meteorológicas.
-    metric_columns = all_cities_data.filter(regex=r"^metrics\.").columns
-    all_cities_data[metric_columns] = all_cities_data[metric_columns].replace(
+    metric_columns = df_total.filter(regex=r"^metrics\.").columns
+    df_total[metric_columns] = df_total[metric_columns].replace(
         ",", ".", regex=True
     )
 
@@ -33,27 +33,27 @@ try:
         "metrics.temperature.unit",
         "metrics.precipitation.unit",
     ]
-    numeric_columns = all_cities_data.drop(
+    numeric_columns = df_total.drop(
         columns=["city", *unit_columns]
     ).columns
 
     # 3. Convierte texto numérico; los valores no válidos pasan a nulos.
-    all_cities_data[numeric_columns] = all_cities_data[numeric_columns].apply(
+    df_total[numeric_columns] = df_total[numeric_columns].apply(
         pd.to_numeric, errors="coerce"
     )
 
     # 4. Limpia explícitamente el valor centinela.
-    all_cities_data[numeric_columns] = all_cities_data[numeric_columns].replace(
+    df_total[numeric_columns] = df_total[numeric_columns].replace(
         -999.0, float("nan")
     )
 
     # 5. Conserva un registro por ciudad, año y mes.
-    all_cities_data = all_cities_data.drop_duplicates(
+    df_total = df_total.drop_duplicates(
         subset=["city", "year", "month"]
     )
 
     # 6. Ordena cronológicamente dentro de cada ciudad.
-    all_cities_data = all_cities_data.sort_values(
+    df_total = df_total.sort_values(
         ["city", "year", "month"], ignore_index=True
     )
 
@@ -63,27 +63,67 @@ try:
         "metrics.temperature.avg",
         "metrics.temperature.min",
     ]
-    fahrenheit_rows = all_cities_data["metrics.temperature.unit"].eq("F")
-    all_cities_data.loc[fahrenheit_rows, temperature_columns] = (
-        all_cities_data.loc[fahrenheit_rows, temperature_columns] - 32
+    fahrenheit_rows = df_total["metrics.temperature.unit"].eq("F")
+    df_total.loc[fahrenheit_rows, temperature_columns] = (
+        df_total.loc[fahrenheit_rows, temperature_columns] - 32
     ) * (5 / 9)
-    all_cities_data.loc[fahrenheit_rows, "metrics.temperature.unit"] = "C"
+    df_total.loc[fahrenheit_rows, "metrics.temperature.unit"] = "C"
 
-    inches_rows = all_cities_data["metrics.precipitation.unit"].eq("inches")
-    all_cities_data.loc[inches_rows, "metrics.precipitation.avg"] *= 25.4
-    all_cities_data.loc[inches_rows, "metrics.precipitation.unit"] = "mm"
+    inches_rows = df_total["metrics.precipitation.unit"].eq("inches")
+    df_total.loc[inches_rows, "metrics.precipitation.avg"] *= 25.4
+    df_total.loc[inches_rows, "metrics.precipitation.unit"] = "mm"
 
-    # 8. Las conversiones usan máscaras vectorizadas, sin recorrer filas.
-    deleted_records = initial_records - len(all_cities_data)
+    # 8. Calcula el enriquecimiento de forma vectorizada, sin recorrer filas.
+    # 9. Añade variables y KPI al DataFrame total.
+    # La oscilación térmica mensual es la diferencia entre la máxima y la mínima.
+    df_total["thermal_range"] = (
+        df_total["metrics.temperature.max"] - df_total["metrics.temperature.min"]
+    )
+
+    # cumsum acumula la lluvia y reinicia el total para cada ciudad y año.
+    # El orden cronológico por ciudad, año y mes se estableció en el punto 6.
+    df_total["cumulative_rain_year"] = df_total.groupby(
+        ["city", "year"]
+    )["metrics.precipitation.avg"].cumsum()
+
+    # El índice aumenta con temperaturas máximas altas y lluvia media baja.
+    # La lluvia está expresada en milímetros; se suma 1 para evitar dividir por cero.
+    df_total["kpi.heat_stress_index"] = df_total[
+        "metrics.temperature.max"
+    ] / (1 + df_total["metrics.precipitation.avg"])
+
+    # Compara cada media mensual con el histórico de su ciudad en desviaciones estándar.
+    # transform devuelve medias y desviaciones alineadas con cada fila del DataFrame.
+    city_temperature = df_total.groupby("city")["metrics.temperature.avg"]
+    df_total["kpi.temp_zscore"] = (
+        df_total["metrics.temperature.avg"] - city_temperature.transform("mean")
+    ) / city_temperature.transform("std")
+
+    deleted_records = initial_records - len(df_total)
     report_path = Path(__file__).with_name("informe_limpieza.txt")
     report_path.write_text(
         f"Registros iniciales: {initial_records}\n"
         f"Registros borrados: {deleted_records}\n"
-        f"Registros finales: {len(all_cities_data)}\n",
+        f"Registros finales: {len(df_total)}\n",
         encoding="utf-8",
     )
 
-    print(all_cities_data.head())
+    city_summary = df_total.groupby("city", as_index=False).agg(
+        historical_mean_temperature=("metrics.temperature.avg", "mean"),
+        total_rainfall=("metrics.precipitation.avg", "sum"),
+    )
+    annual_summary = df_total.groupby(
+        ["city", "year"], as_index=False
+    ).agg(
+        absolute_max_temperature=("metrics.temperature.max", "max"),
+        absolute_min_temperature=("metrics.temperature.min", "min"),
+    )
+
+    print(df_total.head())
+    print("\nResumen por ciudad:")
+    print(city_summary)
+    print("\nResumen anual:")
+    print(annual_summary)
 
 except requests.exceptions.RequestException as e:
     print(f'Error en la petición: {e}')
